@@ -6,11 +6,14 @@ import {
   ArrowUp,
   BookOpen,
   Check,
+  ChevronDown,
+  ChevronRight,
   ClipboardCopy,
   FileText,
   Globe,
   Library,
   Plus,
+  Sparkles,
   Trash2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -18,10 +21,11 @@ import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
-import { copyReference, copyReferenceList } from "@/lib/clipboard";
+import { copyPlainText, copyReference, copyReferenceList } from "@/lib/clipboard";
 import { useLibrary } from "@/lib/library";
-import type { LibraryEntry, WorkType } from "@/lib/types";
+import type { LibraryEntry, SavedSummaryEntry, WorkType } from "@/lib/types";
 import { ManualAddDrawer } from "./ManualAddDrawer";
+import { formatSummaryPlainText, SummaryView } from "@/components/summary/SummaryPanel";
 
 type SortMode = "manual" | "alpha";
 const SORT_STORAGE_KEY = "apa7_reference_list_sort_v1";
@@ -56,6 +60,8 @@ export function LibraryPanel() {
     remove,
     move,
     clear,
+    summaries,
+    removeSummary,
   } = useLibrary();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
@@ -175,6 +181,10 @@ export function LibraryPanel() {
           </Button>
         </div>
       </div>
+
+      {summaries.length > 0 && (
+        <SavedSummariesSection summaries={summaries} onRemove={removeSummary} />
+      )}
 
       {entries.length === 0 ? (
         <div className="rounded-lg border border-border bg-card p-12 text-center">
@@ -438,6 +448,100 @@ function InlineText({ label, value }: { label: string; value: string }) {
     <div>
       <p className="text-xs uppercase tracking-wide text-muted-foreground">{label}</p>
       <p className="pt-1 font-mono text-sm">{value}</p>
+    </div>
+  );
+}
+
+function SavedSummariesSection({
+  summaries,
+  onRemove,
+}: {
+  summaries: SavedSummaryEntry[];
+  onRemove: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(true);
+  return (
+    <div className="rounded-lg border border-border bg-card">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className="flex w-full items-center gap-2 px-5 py-3 text-sm transition-colors hover:bg-accent/40"
+      >
+        {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+        <Sparkles className="h-4 w-4 text-primary" />
+        <span className="font-medium">已保存概要</span>
+        <span className="text-xs text-muted-foreground">（{summaries.length}）</span>
+      </button>
+      {open && (
+        <div className="space-y-4 border-t border-border p-5">
+          {summaries.map((entry) => (
+            <SavedSummaryRow key={entry.id} entry={entry} onRemove={() => onRemove(entry.id)} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SavedSummaryRow({ entry, onRemove }: { entry: SavedSummaryEntry; onRemove: () => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const title =
+    entry.summary.title_guess?.trim() ||
+    entry.filename?.trim() ||
+    (entry.source === "paste" ? "粘贴文本" : "未命名概要");
+
+  const copy = async () => {
+    await copyPlainText(formatSummaryPlainText(entry.summary));
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  };
+
+  return (
+    <div className="space-y-3 rounded-md border border-border bg-background p-4">
+      <div className="flex items-start gap-3">
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          className="flex min-w-0 flex-1 items-start gap-2 text-left"
+        >
+          {expanded ? (
+            <ChevronDown className="mt-1 h-4 w-4 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="mt-1 h-4 w-4 shrink-0 text-muted-foreground" />
+          )}
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium">{title}</p>
+            <p className="text-xs text-muted-foreground">
+              {entry.source === "upload" ? "来自上传" : "来自粘贴"} · {entry.outputLanguage === "zh" ? "中文" : "English"} ·{" "}
+              {new Date(entry.createdAt).toLocaleString()}
+            </p>
+          </div>
+        </button>
+        <div className="flex items-center gap-1">
+          <Button variant="ghost" size="sm" onClick={copy}>
+            {copied ? <Check className="h-3.5 w-3.5" /> : <ClipboardCopy className="h-3.5 w-3.5" />}
+            {copied ? "已复制" : "复制"}
+          </Button>
+          <Button variant="ghost" size="icon" onClick={onRemove} aria-label="删除概要">
+            <Trash2 className="h-4 w-4 text-destructive" />
+          </Button>
+        </div>
+      </div>
+      {!expanded && (
+        <div className="flex flex-wrap gap-2">
+          {entry.summary.topic_tags.slice(0, 6).map((tag, idx) => (
+            <Badge key={idx}>{tag}</Badge>
+          ))}
+          {entry.summary.keywords.slice(0, 6).map((word, idx) => (
+            <Badge key={idx} tone="outline">
+              {word}
+            </Badge>
+          ))}
+        </div>
+      )}
+      {expanded && <SummaryView summary={entry.summary} />}
     </div>
   );
 }

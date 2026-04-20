@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { AlertCircle, CheckCircle2, ChevronDown, ChevronUp, FileText, Library, Loader2, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -8,19 +8,13 @@ import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { UploadSurface } from "./UploadSurface";
 import { CitationResultView } from "@/components/citation/CitationResultView";
-import { createJob, createJobsBatch, pollJob, pollJobsUntilSettled } from "@/lib/api";
+import { createJob, createJobsBatch } from "@/lib/api";
 import type { CitationResult, JobRecord, LocalePolicy, VisionMode } from "@/lib/types";
 import { useLibrary } from "@/lib/library";
+import { useBackgroundTasks } from "@/lib/background-tasks";
+import type { CitationJobItem } from "@/lib/background-tasks";
 
 type Mode = "file" | "paste";
-type State = "idle" | "processing" | "success" | "error";
-
-interface JobItem {
-  id: string;
-  label: string;
-  record: JobRecord;
-  added: boolean;
-}
 
 export function ConvertPanel() {
   const [mode, setMode] = useState<Mode>("file");
@@ -30,13 +24,18 @@ export function ConvertPanel() {
   const [localePolicy, setLocalePolicy] = useState<LocalePolicy>("en_all");
   const [enableCrossref, setEnableCrossref] = useState(true);
   const [vision, setVision] = useState<VisionMode>("conservative");
-
-  const [state, setState] = useState<State>("idle");
-  const [items, setItems] = useState<JobItem[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const { addFromResult, activeProjectName } = useLibrary();
+  const {
+    citationRun,
+    startCitationRun,
+    markCitationItemAdded,
+    clearCitationRun,
+  } = useBackgroundTasks();
 
+  const items = citationRun?.items ?? [];
   const total = items.length;
   const completed = useMemo(
     () => items.filter((item) => item.record.status === "succeeded" || item.record.status === "failed").length,
@@ -44,36 +43,16 @@ export function ConvertPanel() {
   );
 
   const progress = useMemo(() => {
-    if (state === "success") return 100;
-    if (state !== "processing" || total === 0) return 0;
+    if (!citationRun || total === 0) return 0;
+    if (citationRun.phase === "success") return 100;
+    if (citationRun.phase !== "processing") return 0;
     const running = items.filter((item) => item.record.status === "running").length;
     return Math.min(95, Math.round(((completed + running * 0.5) / total) * 100));
-  }, [state, items, total, completed]);
-
-  useEffect(() => {
-    if (state !== "processing" || total === 0) return;
-    if (completed === total) {
-      const anySucceeded = items.some((item) => item.record.status === "succeeded");
-      if (anySucceeded) {
-        setState("success");
-        setError(null);
-      } else {
-        setError(items.map((item) => item.record.error).filter(Boolean).join("；") || "全部转换失败");
-        setState("error");
-      }
-    }
-  }, [state, items, completed, total]);
+  }, [citationRun, items, total, completed]);
 
   const reset = () => {
-    setState("idle");
-    setItems([]);
-    setError(null);
-  };
-
-  const patchJob = (record: JobRecord) => {
-    setItems((current) =>
-      current.map((item) => (item.id === record.id ? { ...item, record } : item)),
-    );
+    clearCitationRun();
+    setSubmitError(null);
   };
 
   const labelFor = (record: JobRecord, fallback: string): string => {
@@ -81,10 +60,11 @@ export function ConvertPanel() {
   };
 
   const submit = async () => {
-    setError(null);
-    setItems([]);
-    setState("processing");
+    if (submitting) return;
+    setSubmitError(null);
+    setSubmitting(true);
     try {
+      let seeded: CitationJobItem[];
       if (mode === "file") {
         if (files.length === 0) throw new Error("请先选择要上传的文件。");
         const initial = await createJobsBatch({
@@ -93,17 +73,12 @@ export function ConvertPanel() {
           enableCrossref,
           vision,
         });
-        const seeded: JobItem[] = initial.map((record, index) => ({
+        seeded = initial.map((record, index) => ({
           id: record.id,
           label: labelFor(record, files[index]?.name ?? `文件 ${index + 1}`),
           record,
           added: false,
         }));
-        setItems(seeded);
-        await pollJobsUntilSettled(
-          initial.map((record) => record.id),
-          patchJob,
-        );
       } else {
         if (!pastedText.trim()) throw new Error("请粘贴要识别的文本。");
         const initial = await createJob({
@@ -112,23 +87,24 @@ export function ConvertPanel() {
           enableCrossref,
           vision,
         });
-        setItems([
+        seeded = [
           {
             id: initial.id,
             label: "粘贴文本",
             record: initial,
             added: false,
           },
-        ]);
-        await pollJob(initial.id, patchJob);
+        ];
       }
+      startCitationRun(seeded);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "发生未知错误。");
-      setState("error");
+      setSubmitError(err instanceof Error ? err.message : "发生未知错误。");
+    } finally {
+      setSubmitting(false);
     }
   };
 
-  if (state === "processing") {
+  if (citationRun && citationRun.phase === "processing") {
     return (
       <section className="mx-auto max-w-3xl">
         <div className="space-y-6 rounded-lg border border-border bg-card p-8">
@@ -142,6 +118,7 @@ export function ConvertPanel() {
               {completed > 0 && completed < total && "抽取文献信息 · 生成 APA 7 引用…"}
               {completed === total && total > 0 && "收尾中…"}
             </p>
+            <p className="text-xs text-muted-foreground">切换页面不会中断任务，回来即可查看进度。</p>
           </div>
           <Progress value={progress} />
           {items.length > 1 && <JobStatusList items={items} />}
@@ -155,19 +132,26 @@ export function ConvertPanel() {
     );
   }
 
-  if (state === "error") {
+  if (citationRun && citationRun.phase === "error") {
     return (
       <section className="mx-auto max-w-3xl">
         <div className="rounded-lg border border-destructive/50 bg-card p-8">
           <div className="space-y-4 text-center">
             <AlertCircle className="mx-auto h-12 w-12 text-destructive" />
             <h3 className="text-lg font-medium">处理失败</h3>
-            <p className="text-sm text-muted-foreground">{error ?? "未知错误，请重试。"}</p>
+            <p className="text-sm text-muted-foreground">{citationRun.error ?? "未知错误，请重试。"}</p>
             <div className="flex justify-center gap-3">
               <Button variant="secondary" onClick={reset}>
                 返回重新选择
               </Button>
-              <Button onClick={submit}>重试</Button>
+              <Button
+                onClick={() => {
+                  clearCitationRun();
+                  void submit();
+                }}
+              >
+                重试
+              </Button>
             </div>
           </div>
         </div>
@@ -175,7 +159,7 @@ export function ConvertPanel() {
     );
   }
 
-  if (state === "success") {
+  if (citationRun && citationRun.phase === "success") {
     return (
       <section className="space-y-6">
         <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
@@ -198,9 +182,7 @@ export function ConvertPanel() {
               item={item}
               onAdd={(result) => {
                 addFromResult(result, "upload_job");
-                setItems((current) =>
-                  current.map((entry) => (entry.id === item.id ? { ...entry, added: true } : entry)),
-                );
+                markCitationItemAdded(citationRun.runId, item.record.id);
               }}
             />
           ))}
@@ -293,6 +275,12 @@ export function ConvertPanel() {
         )}
       </div>
 
+      {submitError && (
+        <div className="rounded-lg border border-destructive/40 bg-card p-4 text-sm text-destructive">
+          {submitError}
+        </div>
+      )}
+
       <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-end sm:gap-3">
         <p className="text-center text-xs text-muted-foreground sm:mr-auto sm:text-left">
           成功加入文献库时将写入当前项目：{activeProjectName}
@@ -304,8 +292,12 @@ export function ConvertPanel() {
               已选择 {files.length} 个文件
             </span>
           )}
-          <Button size="lg" onClick={submit}>
-            {mode === "file" && files.length > 1 ? `并行生成 ${files.length} 条引用` : "生成 APA 7 引用"}
+          <Button size="lg" onClick={submit} disabled={submitting}>
+            {submitting
+              ? "提交中…"
+              : mode === "file" && files.length > 1
+                ? `并行生成 ${files.length} 条引用`
+                : "生成 APA 7 引用"}
           </Button>
         </div>
       </div>
@@ -313,7 +305,7 @@ export function ConvertPanel() {
   );
 }
 
-function JobStatusList({ items }: { items: JobItem[] }) {
+function JobStatusList({ items }: { items: CitationJobItem[] }) {
   return (
     <ul className="divide-y divide-border rounded-md border border-border bg-background">
       {items.map((item) => (
@@ -347,7 +339,7 @@ function statusLabel(status: JobRecord["status"]): string {
   }
 }
 
-function ResultCard({ item, onAdd }: { item: JobItem; onAdd: (result: CitationResult) => void }) {
+function ResultCard({ item, onAdd }: { item: CitationJobItem; onAdd: (result: CitationResult) => void }) {
   const { record, added, label } = item;
 
   if (record.status === "failed") {

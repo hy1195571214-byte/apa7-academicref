@@ -6,9 +6,12 @@ import type {
   CitationResult,
   LibraryEntry,
   LibraryStoreV1,
+  LiteratureSummary,
   LocalePolicy,
   ReferenceProject,
+  SavedSummaryEntry,
   StructuredCitation,
+  SummaryLanguage,
 } from "./types";
 
 export const LIBRARY_STORAGE_KEY = "apa7_library_v1";
@@ -31,6 +34,7 @@ function createEmptyStore(): LibraryStoreV1 {
         name: "默认项目",
         createdAt: now,
         entries: [],
+        summaries: [],
       },
     ],
   };
@@ -53,9 +57,10 @@ function isValidStore(parsed: unknown): parsed is LibraryStoreV1 {
 
 function normalizeStore(store: LibraryStoreV1): LibraryStoreV1 {
   if (store.projects.length === 0) return createEmptyStore();
-  const activeOk = store.projects.some((p) => p.id === store.activeProjectId);
-  if (activeOk) return store;
-  return { ...store, activeProjectId: store.projects[0].id };
+  const projects = store.projects.map((p) => (Array.isArray(p.summaries) ? p : { ...p, summaries: [] }));
+  const activeOk = projects.some((p) => p.id === store.activeProjectId);
+  const activeProjectId = activeOk ? store.activeProjectId : projects[0].id;
+  return { ...store, projects, activeProjectId };
 }
 
 /** Migrate legacy flat `LibraryEntry[]` into a single default project (exported for tests / tooling). */
@@ -71,6 +76,7 @@ export function migrateLegacyLibrary(entries: LibraryEntry[]): LibraryStoreV1 {
         name: "默认项目",
         createdAt: now,
         entries: [...entries],
+        summaries: [],
       },
     ],
   };
@@ -167,6 +173,7 @@ export function useLibrary() {
         name: trimmed,
         createdAt: new Date().toISOString(),
         entries: [],
+        summaries: [],
       };
       updateStore((s) => ({
         ...s,
@@ -280,8 +287,53 @@ export function useLibrary() {
     });
   }, [updateStore]);
 
+  const addSummary = useCallback(
+    (input: {
+      summary: LiteratureSummary;
+      source: SavedSummaryEntry["source"];
+      filename?: string | null;
+      outputLanguage: SummaryLanguage;
+    }): SavedSummaryEntry => {
+      const entry: SavedSummaryEntry = {
+        id: uuid(),
+        createdAt: new Date().toISOString(),
+        source: input.source,
+        filename: input.filename ?? null,
+        outputLanguage: input.outputLanguage,
+        summary: input.summary,
+      };
+      updateStore((s) => {
+        const idx = projectIndex(s);
+        const projects = [...s.projects];
+        const p = projects[idx];
+        const summaries = Array.isArray(p.summaries) ? p.summaries : [];
+        projects[idx] = { ...p, summaries: [entry, ...summaries] };
+        return { ...s, projects };
+      });
+      return entry;
+    },
+    [updateStore],
+  );
+
+  const removeSummary = useCallback(
+    (id: string) => {
+      updateStore((s) => {
+        const idx = projectIndex(s);
+        const projects = [...s.projects];
+        const p = projects[idx];
+        const summaries = Array.isArray(p.summaries) ? p.summaries : [];
+        projects[idx] = { ...p, summaries: summaries.filter((e) => e.id !== id) };
+        return { ...s, projects };
+      });
+    },
+    [updateStore],
+  );
+
+  const summaries = activeProject?.summaries ?? [];
+
   return {
     entries,
+    summaries,
     projects,
     activeProjectId,
     activeProjectName,
@@ -294,6 +346,8 @@ export function useLibrary() {
     remove,
     move,
     clear,
+    addSummary,
+    removeSummary,
   };
 }
 

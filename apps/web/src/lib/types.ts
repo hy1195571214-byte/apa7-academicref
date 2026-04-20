@@ -85,11 +85,40 @@ export interface LibraryEntry {
   notes?: string;
 }
 
+export type SummaryLanguage = "zh" | "en";
+
+export interface LiteratureSummary {
+  title_guess?: string | null;
+  key_claims: string[];
+  keywords: string[];
+  topic_tags: string[];
+}
+
+export interface SummaryBatchItem {
+  filename: string;
+  summary: LiteratureSummary | null;
+  error: string | null;
+}
+
+export interface SummaryBatchResponse {
+  items: SummaryBatchItem[];
+}
+
+export interface SavedSummaryEntry {
+  id: string;
+  createdAt: string;
+  source: "upload" | "paste";
+  filename?: string | null;
+  outputLanguage: SummaryLanguage;
+  summary: LiteratureSummary;
+}
+
 export interface ReferenceProject {
   id: string;
   name: string;
   createdAt: string;
   entries: LibraryEntry[];
+  summaries?: SavedSummaryEntry[];
 }
 
 export interface LibraryStoreV1 {

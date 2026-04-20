@@ -41,9 +41,13 @@ development, so the browser never sees the MiniMax key.
   journal article, book, book chapter, webpage). Batch jobs run concurrently
   on the API with an upper bound of `MAX_CONCURRENT_JOBS` (default 5) to
   avoid overwhelming MiniMax.
+- Literature summaries: `POST /v1/summary` and `POST /v1/summary/batch`
+  extract key claims, keywords, and topic tags from a document or pasted
+  text. Batch summaries reuse the same concurrency cap as jobs.
 - Outputs: APA 7 reference entry + parenthetical + narrative in-text citations.
 - Reference library: browser-local (`localStorage`), supports add / edit /
-  delete / reorder / copy-all. No downloads in MVP.
+  delete / reorder / copy-all, plus per-project saved summaries that sync
+  with the summary page's active project. No downloads in MVP.
 - Chinese sources default to fully English APA entries; `title_original` is
   preserved for traceability but the rendered output uses English.
 - No URL scraping in MVP.

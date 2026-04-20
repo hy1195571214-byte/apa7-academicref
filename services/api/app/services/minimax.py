@@ -19,6 +19,7 @@ from tenacity import (
 
 from ..core.config import Settings
 from ..schemas.citation import StructuredCitation
+from ..schemas.summary import LiteratureSummary
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +187,34 @@ Output constraints:
   text."""
 
 
+SUMMARY_SYSTEM_PROMPT_ZH = """你负责阅读学术文献的文字或配图，并输出该文献的结构化概要。
+严格输出 JSON（不要使用 Markdown 代码围栏、也不要额外解说），键固定为：
+- title_guess: 若原文有明确标题，填写；否则为 null（字符串或 null）。
+- key_claims: 3 到 8 条核心论点或结论，每条一个中文短句（不超过 40 字），按原文出现顺序排列；必须基于原文信息，不得臆造。
+- keywords: 5 到 15 个关键词，单个词或短词组，中文优先；若原文本身为英文术语且无广泛中文对应，可保留英文原词。
+- topic_tags: 3 到 10 个更高层的话题标签，用于分类与检索，例如学科、研究方法、研究对象等，中文为主、简洁。
+
+通用规则：
+- 所有文本使用简体中文输出（除保留的英文专有名词外）。
+- 不允许在任何字段里出现 Markdown、编号、前后引号或多余空白。
+- 对于数组字段，如果内容未知必须输出空数组 []，禁止使用 null。
+- 不要输出 JSON 之外的任何字符。"""
+
+
+SUMMARY_SYSTEM_PROMPT_EN = """You read an academic work (text or images) and output a structured summary.
+Return STRICT JSON only (no markdown fences, no commentary). Keys:
+- title_guess: a clear title if present in the source, else null.
+- key_claims: 3 to 8 short English sentences stating the main claims or findings, in source order. Ground them in the source; do not invent.
+- keywords: 5 to 15 keywords or short phrases relevant to the work.
+- topic_tags: 3 to 10 higher-level topical tags suitable for cataloguing (field, method, object of study, etc.).
+
+Rules:
+- English throughout.
+- No markdown, numbering, stray quotes, or trailing whitespace inside any value.
+- For unknown arrays use [] (never null).
+- Output JSON only."""
+
+
 class MiniMaxClient:
     def __init__(self, settings: Settings) -> None:
         self._api_key = settings.minimax_api_key
@@ -217,6 +246,30 @@ class MiniMaxClient:
         )
         data = _parse_json(response)
         return StructuredCitation.model_validate(data)
+
+    async def summarize(
+        self,
+        *,
+        text: str,
+        images: Optional[List[bytes]] = None,
+        language: str = "zh",
+    ) -> LiteratureSummary:
+        system_prompt = SUMMARY_SYSTEM_PROMPT_EN if language == "en" else SUMMARY_SYSTEM_PROMPT_ZH
+        header = (
+            "Excerpt:\n" if text else "(Visual input only; transcribe and summarise.)\n"
+        )
+        payload = f"{header}{text}" if text else header
+        model = self._model_vision if images else self._model_text
+        content = _build_user_content(payload, images or [])
+        response = await self._chat(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": content},
+            ],
+        )
+        data = _parse_json(response)
+        return LiteratureSummary.model_validate(data)
 
     async def render_apa(
         self,

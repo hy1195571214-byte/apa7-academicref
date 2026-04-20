@@ -1,8 +1,12 @@
 import type {
   CitationResult,
   JobRecord,
+  LiteratureSummary,
   LocalePolicy,
   StructuredCitation,
+  SummaryBatchItem,
+  SummaryBatchResponse,
+  SummaryLanguage,
   VisionMode,
 } from "./types";
 
@@ -77,6 +81,39 @@ export async function renderCitation(input: {
   });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
+}
+
+export async function runSummary(input: {
+  file?: File;
+  pastedText?: string;
+  outputLanguage: SummaryLanguage;
+  vision: Exclude<VisionMode, "aggressive">;
+}): Promise<LiteratureSummary> {
+  const form = new FormData();
+  if (input.file) form.append("file", input.file);
+  if (input.pastedText) form.append("pasted_text", input.pastedText);
+  form.append("output_language", input.outputLanguage);
+  form.append("vision", input.vision);
+
+  const response = await fetch(`${API_PREFIX}/v1/summary`, { method: "POST", body: form });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function runSummaryBatch(input: {
+  files: File[];
+  outputLanguage: SummaryLanguage;
+  vision: Exclude<VisionMode, "aggressive">;
+}): Promise<SummaryBatchItem[]> {
+  const form = new FormData();
+  for (const file of input.files) form.append("files", file);
+  form.append("output_language", input.outputLanguage);
+  form.append("vision", input.vision);
+
+  const response = await fetch(`${API_PREFIX}/v1/summary/batch`, { method: "POST", body: form });
+  if (!response.ok) throw new Error(await parseError(response));
+  const payload = (await response.json()) as SummaryBatchResponse;
+  return payload.items;
 }
 
 export async function pollJob(id: string, onUpdate: (record: JobRecord) => void, intervalMs = 1500): Promise<JobRecord> {
