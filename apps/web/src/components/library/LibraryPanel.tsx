@@ -62,6 +62,7 @@ export function LibraryPanel() {
     clear,
     summaries,
     removeSummary,
+    linkSummaryToEntry,
   } = useLibrary();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
@@ -183,7 +184,12 @@ export function LibraryPanel() {
       </div>
 
       {summaries.length > 0 && (
-        <SavedSummariesSection summaries={summaries} onRemove={removeSummary} />
+        <SavedSummariesSection
+          summaries={summaries}
+          entries={entries}
+          onRemove={removeSummary}
+          onLink={linkSummaryToEntry}
+        />
       )}
 
       {entries.length === 0 ? (
@@ -206,6 +212,7 @@ export function LibraryPanel() {
               isFirst={index === 0}
               isLast={index === displayEntries.length - 1}
               manualSort={manualSort}
+              linkedSummary={summaries.find((s) => s.linkedEntryId === entry.id) ?? null}
               onRemove={() => remove(entry.id)}
               onUp={manualSort ? () => move(entry.id, -1) : undefined}
               onDown={manualSort ? () => move(entry.id, 1) : undefined}
@@ -349,6 +356,7 @@ function LibraryRow({
   isFirst,
   isLast,
   manualSort,
+  linkedSummary,
   onRemove,
   onUp,
   onDown,
@@ -357,12 +365,14 @@ function LibraryRow({
   isFirst: boolean;
   isLast: boolean;
   manualSort: boolean;
+  linkedSummary: SavedSummaryEntry | null;
   onRemove: () => void;
   onUp?: () => void;
   onDown?: () => void;
 }) {
   const [copied, setCopied] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const [summaryOpen, setSummaryOpen] = useState(false);
 
   const copyEntry = async () => {
     await copyReference(entry.rendered.reference_plain, entry.rendered.reference_html);
@@ -418,12 +428,42 @@ function LibraryRow({
               {entry.source === "manual" ? "手动添加" : "来自上传"}
             </Badge>
             {entry.crossrefUsed && <Badge tone="positive">Crossref</Badge>}
+            {linkedSummary && (
+              <Badge tone="positive">
+                <Sparkles className="h-3 w-3" /> 已关联概要
+              </Badge>
+            )}
             <span className="ml-auto">{new Date(entry.createdAt).toLocaleString()}</span>
           </div>
           {expanded && (
             <div className="grid gap-2 rounded-md bg-muted/60 p-3 md:grid-cols-2">
               <InlineText label="Parenthetical" value={entry.rendered.in_text_parenthetical} />
               <InlineText label="Narrative" value={entry.rendered.in_text_narrative} />
+            </div>
+          )}
+          {linkedSummary && (
+            <div className="rounded-md border border-dashed border-border bg-background/60">
+              <button
+                type="button"
+                onClick={() => setSummaryOpen((value) => !value)}
+                className="flex w-full items-center gap-2 px-3 py-2 text-xs text-muted-foreground hover:text-foreground"
+              >
+                {summaryOpen ? (
+                  <ChevronDown className="h-3.5 w-3.5" />
+                ) : (
+                  <ChevronRight className="h-3.5 w-3.5" />
+                )}
+                <Sparkles className="h-3.5 w-3.5 text-primary" />
+                <span>文献概要</span>
+                <span className="ml-1 truncate text-[11px]">
+                  {linkedSummary.summary.title_guess?.trim() || linkedSummary.filename || ""}
+                </span>
+              </button>
+              {summaryOpen && (
+                <div className="border-t border-border p-3">
+                  <SummaryView summary={linkedSummary.summary} />
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -454,10 +494,14 @@ function InlineText({ label, value }: { label: string; value: string }) {
 
 function SavedSummariesSection({
   summaries,
+  entries,
   onRemove,
+  onLink,
 }: {
   summaries: SavedSummaryEntry[];
+  entries: LibraryEntry[];
   onRemove: (id: string) => void;
+  onLink: (summaryId: string, entryId: string | null) => void;
 }) {
   const [open, setOpen] = useState(true);
   return (
@@ -475,7 +519,13 @@ function SavedSummariesSection({
       {open && (
         <div className="space-y-4 border-t border-border p-5">
           {summaries.map((entry) => (
-            <SavedSummaryRow key={entry.id} entry={entry} onRemove={() => onRemove(entry.id)} />
+            <SavedSummaryRow
+              key={entry.id}
+              entry={entry}
+              entries={entries}
+              onRemove={() => onRemove(entry.id)}
+              onLink={(entryId) => onLink(entry.id, entryId)}
+            />
           ))}
         </div>
       )}
@@ -483,7 +533,33 @@ function SavedSummariesSection({
   );
 }
 
-function SavedSummaryRow({ entry, onRemove }: { entry: SavedSummaryEntry; onRemove: () => void }) {
+function summaryEntryLabel(entry: LibraryEntry): string {
+  const firstAuthor = entry.structured.authors?.[0];
+  const author =
+    firstAuthor?.family?.trim() ||
+    firstAuthor?.literal?.trim() ||
+    firstAuthor?.given?.trim() ||
+    "";
+  const year = entry.structured.year ? ` (${entry.structured.year})` : "";
+  const title =
+    entry.structured.title?.trim() ||
+    entry.structured.title_english?.trim() ||
+    entry.rendered.reference_plain.slice(0, 60);
+  const prefix = `${author}${year}`;
+  return (prefix ? `${prefix} · ${title}` : title).slice(0, 80);
+}
+
+function SavedSummaryRow({
+  entry,
+  entries,
+  onRemove,
+  onLink,
+}: {
+  entry: SavedSummaryEntry;
+  entries: LibraryEntry[];
+  onRemove: () => void;
+  onLink: (entryId: string | null) => void;
+}) {
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -491,6 +567,10 @@ function SavedSummaryRow({ entry, onRemove }: { entry: SavedSummaryEntry; onRemo
     entry.summary.title_guess?.trim() ||
     entry.filename?.trim() ||
     (entry.source === "paste" ? "粘贴文本" : "未命名概要");
+
+  const linkedEntry = entry.linkedEntryId
+    ? entries.find((e) => e.id === entry.linkedEntryId) ?? null
+    : null;
 
   const copy = async () => {
     await copyPlainText(formatSummaryPlainText(entry.summary));
@@ -528,6 +608,30 @@ function SavedSummaryRow({ entry, onRemove }: { entry: SavedSummaryEntry; onRemo
             <Trash2 className="h-4 w-4 text-destructive" />
           </Button>
         </div>
+      </div>
+      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <span className="font-medium">关联文献：</span>
+        {entries.length === 0 ? (
+          <span>当前项目暂无文献可关联</span>
+        ) : (
+          <Select
+            value={entry.linkedEntryId ?? ""}
+            onChange={(event) => onLink(event.target.value || null)}
+            className="h-8 w-full max-w-sm sm:w-auto sm:min-w-[16rem]"
+          >
+            <option value="">未关联</option>
+            {entries.map((candidate) => (
+              <option key={candidate.id} value={candidate.id}>
+                {summaryEntryLabel(candidate)}
+              </option>
+            ))}
+          </Select>
+        )}
+        {linkedEntry && (
+          <Badge tone="positive">
+            <Sparkles className="h-3 w-3" /> 已关联
+          </Badge>
+        )}
       </div>
       {!expanded && (
         <div className="flex flex-wrap gap-2">

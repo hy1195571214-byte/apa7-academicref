@@ -18,14 +18,25 @@ import type {
   VisionMode,
 } from "./types";
 
+export type CitationSummaryStatus = "idle" | "loading" | "done" | "error";
+
 export interface CitationJobItem {
   id: string;
   label: string;
   record: JobRecord;
   added: boolean;
+  summary?: LiteratureSummary | null;
+  summaryError?: string | null;
+  summaryStatus?: CitationSummaryStatus;
 }
 
 export type CitationRunPhase = "processing" | "success" | "error";
+
+export interface CitationRunMeta {
+  generateSummary: boolean;
+  summaryLanguage?: SummaryLanguage;
+  summaryVision?: Exclude<VisionMode, "aggressive">;
+}
 
 export interface CitationRun {
   runId: string;
@@ -33,6 +44,7 @@ export interface CitationRun {
   items: CitationJobItem[];
   error: string | null;
   startedAt: number;
+  meta: CitationRunMeta;
 }
 
 export interface SummaryResultItem {
@@ -80,9 +92,17 @@ type SummaryStartArgs =
       vision: Exclude<VisionMode, "aggressive">;
     };
 
+export interface CitationRunOptions {
+  meta?: Partial<CitationRunMeta>;
+  inputs?: {
+    filesByJobId?: Record<string, File>;
+    pastedByJobId?: Record<string, string>;
+  };
+}
+
 interface BackgroundTasksContextValue {
   citationRun: CitationRun | null;
-  startCitationRun: (items: CitationJobItem[]) => string;
+  startCitationRun: (items: CitationJobItem[], options?: CitationRunOptions) => string;
   markCitationItemAdded: (runId: string, jobId: string) => void;
   clearCitationRun: () => void;
 
@@ -113,10 +133,28 @@ function deriveError(items: CitationJobItem[]): string | null {
   return errors.join("；");
 }
 
+const DEFAULT_CITATION_META: CitationRunMeta = {
+  generateSummary: false,
+  summaryLanguage: "zh",
+  summaryVision: "conservative",
+};
+
+function normalizeCitationMeta(meta?: Partial<CitationRunMeta>): CitationRunMeta {
+  return { ...DEFAULT_CITATION_META, ...(meta ?? {}) };
+}
+
+interface CitationRunInputs {
+  runId: string;
+  filesByJobId: Map<string, File>;
+  pastedByJobId: Map<string, string>;
+}
+
 export function BackgroundTasksProvider({ children }: { children: React.ReactNode }) {
   const [citationRun, setCitationRun] = useState<CitationRun | null>(null);
   const [summaryRun, setSummaryRun] = useState<SummaryRun | null>(null);
   const citationRef = useRef<CitationRun | null>(null);
+  const citationInputsRef = useRef<CitationRunInputs | null>(null);
+  const summaryTriggeredRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     citationRef.current = citationRun;
@@ -130,16 +168,32 @@ export function BackgroundTasksProvider({ children }: { children: React.ReactNod
       const parsed = JSON.parse(raw) as {
         runId: string;
         startedAt: number;
-        jobs: { id: string; label: string; added: boolean }[];
+        meta?: Partial<CitationRunMeta>;
+        jobs: {
+          id: string;
+          label: string;
+          added: boolean;
+          summary?: LiteratureSummary | null;
+          summaryError?: string | null;
+          summaryStatus?: CitationSummaryStatus;
+        }[];
       };
       if (!parsed?.jobs?.length) return;
       (async () => {
         try {
           const fetched = await Promise.all(
-            parsed.jobs.map(async (job) => {
+            parsed.jobs.map(async (job): Promise<CitationJobItem | null> => {
               try {
                 const record = await getJob(job.id);
-                return { id: job.id, label: job.label, record, added: job.added };
+                return {
+                  id: job.id,
+                  label: job.label,
+                  record,
+                  added: job.added,
+                  summary: job.summary ?? null,
+                  summaryError: job.summaryError ?? null,
+                  summaryStatus: job.summaryStatus ?? "idle",
+                };
               } catch {
                 return null;
               }
@@ -157,6 +211,7 @@ export function BackgroundTasksProvider({ children }: { children: React.ReactNod
             items,
             error: phase === "error" ? deriveError(items) : null,
             startedAt: parsed.startedAt,
+            meta: normalizeCitationMeta(parsed.meta),
           });
         } catch {
           window.sessionStorage.removeItem(CITATION_SESSION_KEY);
@@ -176,10 +231,14 @@ export function BackgroundTasksProvider({ children }: { children: React.ReactNod
     const payload = {
       runId: citationRun.runId,
       startedAt: citationRun.startedAt,
+      meta: citationRun.meta,
       jobs: citationRun.items.map((item) => ({
         id: item.record.id,
         label: item.label,
         added: item.added,
+        summary: item.summary ?? null,
+        summaryError: item.summaryError ?? null,
+        summaryStatus: item.summaryStatus ?? "idle",
       })),
     };
     try {
@@ -238,15 +297,106 @@ export function BackgroundTasksProvider({ children }: { children: React.ReactNod
     };
   }, [citationRun?.runId, citationRun?.phase]);
 
-  const startCitationRun = useCallback((items: CitationJobItem[]) => {
+  useEffect(() => {
+    if (!citationRun) return;
+    if (!citationRun.meta.generateSummary) return;
+    const inputs = citationInputsRef.current;
+    if (!inputs || inputs.runId !== citationRun.runId) return;
+
+    const language = citationRun.meta.summaryLanguage ?? "zh";
+    const vision = citationRun.meta.summaryVision ?? "conservative";
+    const runId = citationRun.runId;
+
+    citationRun.items.forEach((item) => {
+      const jobId = item.record.id;
+      if (item.record.status !== "succeeded") return;
+      if (item.summaryStatus && item.summaryStatus !== "idle") return;
+      if (summaryTriggeredRef.current.has(jobId)) return;
+      const file = inputs.filesByJobId.get(jobId);
+      const paste = inputs.pastedByJobId.get(jobId);
+      if (!file && !paste) return;
+
+      summaryTriggeredRef.current.add(jobId);
+      setCitationRun((prev) => {
+        if (!prev || prev.runId !== runId) return prev;
+        return {
+          ...prev,
+          items: prev.items.map((it) =>
+            it.record.id === jobId ? { ...it, summaryStatus: "loading", summaryError: null } : it,
+          ),
+        };
+      });
+
+      void (async () => {
+        try {
+          const summary = await runSummary({
+            file,
+            pastedText: paste,
+            outputLanguage: language,
+            vision,
+          });
+          setCitationRun((prev) => {
+            if (!prev || prev.runId !== runId) return prev;
+            return {
+              ...prev,
+              items: prev.items.map((it) =>
+                it.record.id === jobId
+                  ? { ...it, summaryStatus: "done", summary, summaryError: null }
+                  : it,
+              ),
+            };
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "生成概要失败";
+          setCitationRun((prev) => {
+            if (!prev || prev.runId !== runId) return prev;
+            return {
+              ...prev,
+              items: prev.items.map((it) =>
+                it.record.id === jobId
+                  ? { ...it, summaryStatus: "error", summaryError: message }
+                  : it,
+              ),
+            };
+          });
+        }
+      })();
+    });
+  }, [citationRun]);
+
+  const startCitationRun = useCallback((items: CitationJobItem[], options?: CitationRunOptions) => {
     const runId = uuid();
     const phase = derivePhase(items);
+    const meta = normalizeCitationMeta(options?.meta);
+    const filesByJobId = new Map<string, File>();
+    const pastedByJobId = new Map<string, string>();
+    if (options?.inputs?.filesByJobId) {
+      for (const [key, value] of Object.entries(options.inputs.filesByJobId)) {
+        filesByJobId.set(key, value);
+      }
+    }
+    if (options?.inputs?.pastedByJobId) {
+      for (const [key, value] of Object.entries(options.inputs.pastedByJobId)) {
+        pastedByJobId.set(key, value);
+      }
+    }
+    citationInputsRef.current = { runId, filesByJobId, pastedByJobId };
+    summaryTriggeredRef.current = new Set();
+
+    const seeded = items.map((item) => ({
+      ...item,
+      summary: item.summary ?? null,
+      summaryError: item.summaryError ?? null,
+      summaryStatus: item.summaryStatus ?? ("idle" as CitationSummaryStatus),
+    }));
+
     setCitationRun({
       runId,
       phase,
-      items,
-      error: phase === "error" ? deriveError(items) : null,
+      items: seeded,
+      error: phase === "error" ? deriveError(seeded) : null,
       startedAt: Date.now(),
+      meta,
     });
     return runId;
   }, []);
@@ -264,6 +414,8 @@ export function BackgroundTasksProvider({ children }: { children: React.ReactNod
   }, []);
 
   const clearCitationRun = useCallback(() => {
+    citationInputsRef.current = null;
+    summaryTriggeredRef.current = new Set();
     setCitationRun(null);
   }, []);
 

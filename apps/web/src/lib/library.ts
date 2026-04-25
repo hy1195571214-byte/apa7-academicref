@@ -57,7 +57,16 @@ function isValidStore(parsed: unknown): parsed is LibraryStoreV1 {
 
 function normalizeStore(store: LibraryStoreV1): LibraryStoreV1 {
   if (store.projects.length === 0) return createEmptyStore();
-  const projects = store.projects.map((p) => (Array.isArray(p.summaries) ? p : { ...p, summaries: [] }));
+  const projects = store.projects.map((project) => {
+    const summariesRaw = Array.isArray(project.summaries) ? project.summaries : [];
+    const entryIds = new Set(project.entries.map((entry) => entry.id));
+    const summaries = summariesRaw.map((summary) => {
+      const linked = summary.linkedEntryId ?? null;
+      if (linked && entryIds.has(linked)) return { ...summary, linkedEntryId: linked };
+      return { ...summary, linkedEntryId: null };
+    });
+    return { ...project, summaries };
+  });
   const activeOk = projects.some((p) => p.id === store.activeProjectId);
   const activeProjectId = activeOk ? store.activeProjectId : projects[0].id;
   return { ...store, projects, activeProjectId };
@@ -252,7 +261,10 @@ export function useLibrary() {
         const idx = projectIndex(s);
         const projects = [...s.projects];
         const p = projects[idx];
-        projects[idx] = { ...p, entries: p.entries.filter((e) => e.id !== id) };
+        const summaries = (p.summaries ?? []).map((entry) =>
+          entry.linkedEntryId === id ? { ...entry, linkedEntryId: null } : entry,
+        );
+        projects[idx] = { ...p, entries: p.entries.filter((e) => e.id !== id), summaries };
         return { ...s, projects };
       });
     },
@@ -282,7 +294,9 @@ export function useLibrary() {
     updateStore((s) => {
       const idx = projectIndex(s);
       const projects = [...s.projects];
-      projects[idx] = { ...projects[idx], entries: [] };
+      const p = projects[idx];
+      const summaries = (p.summaries ?? []).map((entry) => ({ ...entry, linkedEntryId: null }));
+      projects[idx] = { ...p, entries: [], summaries };
       return { ...s, projects };
     });
   }, [updateStore]);
@@ -293,6 +307,7 @@ export function useLibrary() {
       source: SavedSummaryEntry["source"];
       filename?: string | null;
       outputLanguage: SummaryLanguage;
+      linkedEntryId?: string | null;
     }): SavedSummaryEntry => {
       const entry: SavedSummaryEntry = {
         id: uuid(),
@@ -301,13 +316,19 @@ export function useLibrary() {
         filename: input.filename ?? null,
         outputLanguage: input.outputLanguage,
         summary: input.summary,
+        linkedEntryId: input.linkedEntryId ?? null,
       };
       updateStore((s) => {
         const idx = projectIndex(s);
         const projects = [...s.projects];
         const p = projects[idx];
         const summaries = Array.isArray(p.summaries) ? p.summaries : [];
-        projects[idx] = { ...p, summaries: [entry, ...summaries] };
+        const entryIds = new Set(p.entries.map((e) => e.id));
+        const normalized: SavedSummaryEntry = {
+          ...entry,
+          linkedEntryId: entry.linkedEntryId && entryIds.has(entry.linkedEntryId) ? entry.linkedEntryId : null,
+        };
+        projects[idx] = { ...p, summaries: [normalized, ...summaries] };
         return { ...s, projects };
       });
       return entry;
@@ -323,6 +344,27 @@ export function useLibrary() {
         const p = projects[idx];
         const summaries = Array.isArray(p.summaries) ? p.summaries : [];
         projects[idx] = { ...p, summaries: summaries.filter((e) => e.id !== id) };
+        return { ...s, projects };
+      });
+    },
+    [updateStore],
+  );
+
+  const linkSummaryToEntry = useCallback(
+    (summaryId: string, entryId: string | null) => {
+      updateStore((s) => {
+        const idx = projectIndex(s);
+        const projects = [...s.projects];
+        const p = projects[idx];
+        const summaries = Array.isArray(p.summaries) ? p.summaries : [];
+        const entryIds = new Set(p.entries.map((e) => e.id));
+        const nextLinked = entryId && entryIds.has(entryId) ? entryId : null;
+        projects[idx] = {
+          ...p,
+          summaries: summaries.map((entry) =>
+            entry.id === summaryId ? { ...entry, linkedEntryId: nextLinked } : entry,
+          ),
+        };
         return { ...s, projects };
       });
     },
@@ -348,6 +390,7 @@ export function useLibrary() {
     clear,
     addSummary,
     removeSummary,
+    linkSummaryToEntry,
   };
 }
 

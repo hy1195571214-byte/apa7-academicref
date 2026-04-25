@@ -111,6 +111,7 @@ export interface SavedSummaryEntry {
   filename?: string | null;
   outputLanguage: SummaryLanguage;
   summary: LiteratureSummary;
+  linkedEntryId?: string | null;
 }
 
 export interface ReferenceProject {
