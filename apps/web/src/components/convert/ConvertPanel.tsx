@@ -18,7 +18,7 @@ import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { UploadSurface } from "./UploadSurface";
 import { CitationResultView } from "@/components/citation/CitationResultView";
-import { createJob, createJobsBatch } from "@/lib/api";
+import { createJob, createJobsBatch, detectReferences } from "@/lib/api";
 import type {
   CitationResult,
   JobRecord,
@@ -26,7 +26,7 @@ import type {
   SummaryLanguage,
   VisionMode,
 } from "@/lib/types";
-import { useLibrary } from "@/lib/library";
+import { useLibrary, checkDuplicate, type DuplicateMatch } from "@/lib/library";
 import { useBackgroundTasks } from "@/lib/background-tasks";
 import type {
   CitationJobItem,
@@ -35,6 +35,7 @@ import type {
 } from "@/lib/background-tasks";
 import { SummaryView, formatSummaryPlainText } from "@/components/summary/SummaryPanel";
 import { copyPlainText } from "@/lib/clipboard";
+import { DuplicateDialog } from "@/components/library/DuplicateDialog";
 
 type InputMode = "file" | "paste";
 type PipelineMode = "cite" | "cite_and_summary" | "summary_only";
@@ -55,7 +56,13 @@ export function ConvertPanel() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [saveAllStatus, setSaveAllStatus] = useState<"idle" | "saved">("idle");
 
-  const { addFromResult, addSummary, activeProjectName } = useLibrary();
+  // Duplicate detection state
+  const [pendingResult, setPendingResult] = useState<CitationResult | null>(null);
+  const [pendingDuplicate, setPendingDuplicate] = useState<DuplicateMatch | null>(null);
+  // jobId for which the pending result belongs (so markCitationItemAdded uses correct run)
+  const [pendingJobId, setPendingJobId] = useState<string | null>(null);
+
+  const { addFromResult, addSummary, activeProjectName, entries } = useLibrary();
   const {
     citationRun,
     startCitationRun,
@@ -172,24 +179,62 @@ export function ConvertPanel() {
       } else {
         const text = pastedText.trim();
         if (!text) throw new Error("请粘贴要识别的文本。");
-        const initial = await createJob({
-          pastedText: text,
-          localePolicy,
-          enableCrossref,
-          vision,
-        });
-        seeded = [
-          {
-            id: initial.id,
-            label: "粘贴文本",
-            record: initial,
+
+        // Detect multiple references in pasted text
+        const detected = await detectReferences(text, localePolicy);
+
+        if (detected.references.length <= 1) {
+          // Single reference: use original single-job flow
+          const initial = await createJob({
+            pastedText: text,
+            localePolicy,
+            enableCrossref,
+            vision,
+          });
+          seeded = [
+            {
+              id: initial.id,
+              label: "粘贴文本",
+              record: initial,
+              added: false,
+              summary: null,
+              summaryError: null,
+              summaryStatus: "idle",
+            },
+          ];
+          pastedByJobId[initial.id] = text;
+        } else {
+          // Multiple references: split text by boundaries and batch process
+          const texts: string[] = [];
+          for (let i = 0; i < detected.references.length; i++) {
+            const start = detected.boundaries[i];
+            const end = detected.boundaries[i + 1] ?? text.length;
+            const slice = text.slice(start, end).trim();
+            if (slice) texts.push(slice);
+          }
+          const initial = await createJobsBatch({
+            pastedTexts: texts,
+            localePolicy,
+            enableCrossref,
+            vision,
+          });
+          seeded = initial.map((record, index) => ({
+            id: record.id,
+            label: `粘贴文本 ${index + 1}`,
+            record,
             added: false,
             summary: null,
             summaryError: null,
-            summaryStatus: "idle",
-          },
-        ];
-        pastedByJobId[initial.id] = text;
+            summaryStatus: "idle" as const,
+          }));
+          // Map each job to its corresponding text slice by index
+          initial.forEach((record, index) => {
+            const start = detected.boundaries[index];
+            const end = detected.boundaries[index + 1] ?? text.length;
+            const slice = text.slice(start, end).trim();
+            if (slice) pastedByJobId[record.id] = slice;
+          });
+        }
       }
 
       const options: CitationRunOptions = {
@@ -292,6 +337,13 @@ export function ConvertPanel() {
               key={item.id}
               item={item}
               onAdd={(result) => {
+                const dupFound = checkDuplicate(entries, result);
+                if (dupFound) {
+                  setPendingResult(result);
+                  setPendingDuplicate(dupFound);
+                  setPendingJobId(item.record.id);
+                  return;
+                }
                 const entry = addFromResult(result, "upload_job");
                 if (item.summary) {
                   addSummary({
@@ -307,6 +359,41 @@ export function ConvertPanel() {
             />
           ))}
         </div>
+        {pendingDuplicate && (
+          <DuplicateDialog
+            open={true}
+            match={pendingDuplicate}
+            onKeepExisting={() => {
+              setPendingResult(null);
+              setPendingDuplicate(null);
+              setPendingJobId(null);
+            }}
+            onKeepNew={() => {
+              if (pendingResult && pendingJobId) {
+                const entry = addFromResult(pendingResult, "upload_job");
+                const item = citationRun?.items.find((it) => it.record.id === pendingJobId);
+                if (item?.summary) {
+                  addSummary({
+                    summary: item.summary,
+                    source: inputMode === "paste" ? "paste" : "upload",
+                    filename: inputMode === "paste" ? null : item.label,
+                    outputLanguage: citationRun.meta.summaryLanguage ?? "zh",
+                    linkedEntryId: entry.id,
+                  });
+                }
+                if (citationRun) markCitationItemAdded(citationRun.runId, pendingJobId);
+              }
+              setPendingResult(null);
+              setPendingDuplicate(null);
+              setPendingJobId(null);
+            }}
+            onCancel={() => {
+              setPendingResult(null);
+              setPendingDuplicate(null);
+              setPendingJobId(null);
+            }}
+          />
+        )}
       </section>
     );
   }

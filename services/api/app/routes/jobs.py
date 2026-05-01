@@ -58,15 +58,27 @@ async def create_job(
 @router.post("/batch", response_model=BatchJobsResponse)
 async def create_jobs_batch(
     request: Request,
-    files: List[UploadFile] = File(...),
+    files: List[UploadFile] = File(default=None),
+    pasted_texts: Optional[str] = Form(default=None),
     locale_policy: LocalePolicy = Form(default="en_all"),
     enable_crossref: bool = Form(default=True),
     vision: VisionMode = Form(default="conservative"),
     settings: Settings = Depends(get_settings),
     store: JobStore = Depends(get_job_store),
 ) -> BatchJobsResponse:
-    if not files:
-        raise HTTPException(status_code=400, detail="Provide at least one file")
+    # Parse pasted_texts JSON array if provided
+    pasted_list: list[str] = []
+    if pasted_texts:
+        import json
+        try:
+            pasted_list = json.loads(pasted_texts)
+            if not isinstance(pasted_list, list):
+                raise HTTPException(status_code=400, detail="pasted_texts must be a JSON array")
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid pasted_texts JSON")
+
+    if not files and not pasted_list:
+        raise HTTPException(status_code=400, detail="Provide at least one file or pasted_texts")
 
     options = JobCreateOptions(
         locale_policy=locale_policy,
@@ -75,9 +87,13 @@ async def create_jobs_batch(
     )
 
     ingested: list[tuple[IngestedDocument, JobEvidence]] = []
-    for upload in files:
+    for upload in (files or []):
         payload = await upload.read()
         ingested.append(_ingest_upload(payload, upload.filename, upload.content_type, settings))
+
+    for text in pasted_list:
+        doc, evidence = _ingest_paste(text)
+        ingested.append((doc, evidence))
 
     records: list[JobRecord] = []
     for document, evidence in ingested:

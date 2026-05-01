@@ -69,6 +69,35 @@ Schema keys:
 
 Respond with JSON only, no markdown fences."""
 
+EXTRACTION_BATCH_SYSTEM_PROMPT = """You are an academic citation parser. Given a block of text
+that may contain one or more reference list entries, identify each reference
+and extract structured metadata (APA 7th) for each one.
+
+Return a JSON object with this exact structure:
+{
+  "references": [
+    { ... structured citation fields for reference 1 ... },
+    { ... structured citation fields for reference 2 ... },
+    ...
+  ],
+  "boundaries": [start_char_index_1, start_char_index_2, ...]
+}
+
+Rules:
+- Split references by looking for patterns like: author-year at start of a new
+  line, numbered references [1], [2], blank lines between entries, or DOIs.
+- Each reference may span one or more lines; boundaries indicate the character
+  offset in the ORIGINAL text where each reference begins.
+- If a field is unknown, use null. For array fields (authors, editors,
+  missing_fields) always use [] when unknown, never null.
+- work_type: one of "journal_article", "book", "book_chapter", "webpage".
+- doi: output only the suffix (e.g. "10.1000/xyz123"), not the full URL.
+- confidence: rate your overall confidence for each reference 0..1.
+- If no references are found, return {"references": [], "boundaries": []}.
+- NEVER invent data. If a reference is incomplete, extract only what is present
+  and set confidence accordingly.
+- Respond with JSON only, no markdown fences."""
+
 
 RENDER_SYSTEM_PROMPT = """You format bibliographic JSON into APA 7th edition
 output. Return STRICT JSON with exactly these keys:
@@ -296,7 +325,13 @@ class MiniMaxClient:
             "in_text_narrative": str(data.get("in_text_narrative", "")),
         }
 
-    async def _chat(self, *, model: str, messages: list[dict[str, Any]]) -> str:
+    async def _chat(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        timeout_override: Optional[float] = None,
+    ) -> str:
         if not self._api_key:
             raise RuntimeError("MINIMAX_API_KEY is not configured")
         url = f"{self._base_url}/text/chatcompletion_v2"
@@ -310,23 +345,27 @@ class MiniMaxClient:
             "Content-Type": "application/json",
         }
 
+        timeout = timeout_override if timeout_override is not None else self._timeout
+
         try:
-            async for attempt in AsyncRetrying(
-                reraise=True,
-                stop=stop_after_attempt(3),
-                wait=wait_exponential(multiplier=0.8, min=0.8, max=6),
-                retry=retry_if_exception_type((httpx.TransportError, httpx.RemoteProtocolError)),
-            ):
-                with attempt:
-                    async with httpx.AsyncClient(timeout=self._timeout) as client:
-                        response = await client.post(url, json=body, headers=headers)
-                    if response.status_code >= 500:
-                        raise httpx.RemoteProtocolError("upstream 5xx")
-                    response.raise_for_status()
-                    return _extract_completion_text(response.json())
-        except RetryError as exc:  # pragma: no cover - defensive
-            raise RuntimeError("MiniMax retries exhausted") from exc
-        raise RuntimeError("MiniMax returned no response")
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(url, json=body, headers=headers)
+            if response.status_code >= 500:
+                raise httpx.HTTPStatusError(
+                    f"Server error: {response.status_code}",
+                    request=response.request,
+                    response=response,
+                )
+            response.raise_for_status()
+            return _extract_completion_text(response.json())
+        except httpx.TimeoutException as exc:
+            raise
+        except httpx.HTTPStatusError:
+            raise
+        except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.TransportError):
+            raise
+        except Exception:
+            raise
 
 
 def _extraction_prompt(*, text: str, hints: Optional[dict[str, Any]]) -> str:
@@ -379,3 +418,54 @@ def _extract_completion_text(payload: dict[str, Any]) -> str:
     if isinstance(content, str):
         return content
     raise RuntimeError(f"MiniMax response has unknown content shape: {payload}")
+
+
+async def extract_references_batch(
+    client: MiniMaxClient,
+    pasted_text: str,
+    locale_policy: str = "en_all",
+) -> tuple[list[StructuredCitation], list[int]]:
+    """Detect and extract multiple reference entries from a block of pasted text.
+
+    Returns (references, boundaries) where boundaries are character offsets in the
+    original text where each reference begins.
+    """
+    payload = (
+        f"The following text contains one or more bibliographic references. "
+        f"Identify each one and extract structured metadata.\n\n{pasted_text}"
+    )
+    content = [{"type": "text", "text": payload}]
+
+    response = await client._chat(
+        model=client._model_text,
+        messages=[
+            {"role": "system", "content": EXTRACTION_BATCH_SYSTEM_PROMPT},
+            {"role": "user", "content": content},
+        ],
+        timeout_override=180.0,  # 3 min for batch detection of many references
+    )
+    data = _parse_json(response)
+
+    raw_refs = data.get("references", [])
+    boundaries: list[int] = data.get("boundaries", [])
+
+    if not isinstance(raw_refs, list):
+        raw_refs = []
+
+    structured_list: list[StructuredCitation] = []
+    for item in raw_refs:
+        if not isinstance(item, dict):
+            continue
+        try:
+            structured_list.append(StructuredCitation.model_validate(item))
+        except Exception:
+            structured_list.append(
+                StructuredCitation(
+                    title=item.get("title"),
+                    doi=item.get("doi"),
+                    year=item.get("year"),
+                    authors=[],
+                )
+            )
+
+    return structured_list, boundaries

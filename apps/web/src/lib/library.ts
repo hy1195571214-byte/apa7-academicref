@@ -72,6 +72,124 @@ function normalizeStore(store: LibraryStoreV1): LibraryStoreV1 {
   return { ...store, projects, activeProjectId };
 }
 
+export interface DuplicateMatch {
+  existingEntry: LibraryEntry;
+  reason: "doi" | "title-author-year";
+  confidence: "exact" | "high";
+  existingLabel: string;
+  candidateLabel: string;
+}
+
+function normalizeForMatch(s: string): string {
+  return s.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function titleSimilarity(a: string | null | undefined, b: string | null | undefined): number {
+  if (!a || !b) return 0;
+  const na = normalizeForMatch(a);
+  const nb = normalizeForMatch(b);
+  if (na === nb) return 1;
+  const [la, lb] = [na.split(" "), nb.split(" ")];
+  const intersection = la.filter((w) => lb.includes(w)).length;
+  const union = new Set([...la, ...lb]).size;
+  return union === 0 ? 0 : intersection / union;
+}
+
+function authorKey(authors: StructuredCitation["authors"]): string {
+  return authors
+    .slice(0, 3)
+    .map((a) => (a.family ?? a.literal ?? a.given ?? "").toLowerCase().trim())
+    .filter(Boolean)
+    .sort()
+    .join("|");
+}
+
+function labelForCitationResult(result: CitationResult): string {
+  const first = result.structured.authors?.[0];
+  const author = first ? (first.family ?? first.literal ?? first.given ?? "").trim() : "";
+  const year = result.structured.year ? String(result.structured.year) : "";
+  const title =
+    result.structured.title_english?.trim() ??
+    result.structured.title?.trim() ??
+    result.structured.title_original?.trim() ??
+    "";
+  const prefix = [author, year].filter(Boolean).join(" · ");
+  return (prefix ? `${prefix} · ${title}` : title).slice(0, 80);
+}
+
+function labelForEntry(entry: LibraryEntry): string {
+  const first = entry.structured.authors?.[0];
+  const author = first ? (first.family ?? first.literal ?? first.given ?? "").trim() : "";
+  const year = entry.structured.year ? String(entry.structured.year) : "";
+  const title =
+    entry.structured.title_english?.trim() ??
+    entry.structured.title?.trim() ??
+    entry.structured.title_original?.trim() ??
+    "";
+  const prefix = [author, year].filter(Boolean).join(" · ");
+  return (prefix ? `${prefix} · ${title}` : title).slice(0, 80);
+}
+
+/**
+ * Returns the best duplicate match found in `entries` for `candidate`,
+ * or null if no duplicate is detected.
+ *
+ * Detection order:
+ *  1. DOI exact match (exact)
+ *  2. Title similarity >= 0.7 + same author key + same year (high)
+ */
+export function checkDuplicate(
+  entries: LibraryEntry[],
+  candidate: CitationResult,
+): DuplicateMatch | null {
+  const candDoi = candidate.structured.doi?.trim() || null;
+
+  // 1. DOI exact
+  if (candDoi) {
+    for (const entry of entries) {
+      if (entry.structured.doi?.trim() === candDoi) {
+        return {
+          existingEntry: entry,
+          reason: "doi",
+          confidence: "exact",
+          existingLabel: labelForEntry(entry),
+          candidateLabel: labelForCitationResult(candidate),
+        };
+      }
+    }
+  }
+
+  // 2. Title + author + year
+  const candTitle =
+    candidate.structured.title_english?.trim() ??
+    candidate.structured.title?.trim() ??
+    null;
+  const candAuthors = candidate.structured.authors ?? [];
+  const candYear = candidate.structured.year ?? null;
+  const candAuthorKey = authorKey(candAuthors);
+
+  for (const entry of entries) {
+    if (entry.structured.doi?.trim() === candDoi) continue; // already handled
+    const sim = titleSimilarity(
+      candTitle,
+      entry.structured.title_english ?? entry.structured.title ?? null,
+    );
+    if (sim < 0.7) continue;
+    if (authorKey(entry.structured.authors ?? []) !== candAuthorKey) continue;
+    if (candYear && entry.structured.year === candYear) {
+      return {
+        existingEntry: entry,
+        reason: "title-author-year",
+        confidence: "high",
+        existingLabel: labelForEntry(entry),
+        candidateLabel: labelForCitationResult(candidate),
+      };
+    }
+  }
+
+  return null;
+}
+
 /** Migrate legacy flat `LibraryEntry[]` into a single default project (exported for tests / tooling). */
 export function migrateLegacyLibrary(entries: LibraryEntry[]): LibraryStoreV1 {
   const id = uuid();

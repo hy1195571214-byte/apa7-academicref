@@ -22,9 +22,10 @@ import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { copyPlainText, copyReference, copyReferenceList } from "@/lib/clipboard";
-import { useLibrary } from "@/lib/library";
+import { useLibrary, checkDuplicate, type DuplicateMatch } from "@/lib/library";
 import type { LibraryEntry, SavedSummaryEntry, WorkType } from "@/lib/types";
 import { ManualAddDrawer } from "./ManualAddDrawer";
+import { DuplicateDialog } from "./DuplicateDialog";
 import { formatSummaryPlainText, SummaryView } from "@/components/summary/SummaryPanel";
 
 type SortMode = "manual" | "alpha";
@@ -65,6 +66,8 @@ export function LibraryPanel() {
     linkSummaryToEntry,
   } = useLibrary();
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [pendingManualResult, setPendingManualResult] = useState<import("@/lib/types").CitationResult | null>(null);
+  const [pendingManualDuplicate, setPendingManualDuplicate] = useState<DuplicateMatch | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const [copiedAll, setCopiedAll] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>("manual");
@@ -225,10 +228,38 @@ export function LibraryPanel() {
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
         onConfirm={(result) => {
+          const dup = checkDuplicate(entries, result);
+          if (dup) {
+            setPendingManualResult(result);
+            setPendingManualDuplicate(dup);
+            return;
+          }
           addFromResult(result, "manual");
           setDrawerOpen(false);
         }}
       />
+      {pendingManualDuplicate && (
+        <DuplicateDialog
+          open={true}
+          match={pendingManualDuplicate}
+          onKeepExisting={() => {
+            setPendingManualResult(null);
+            setPendingManualDuplicate(null);
+          }}
+          onKeepNew={() => {
+            if (pendingManualResult) {
+              addFromResult(pendingManualResult, "manual");
+            }
+            setDrawerOpen(false);
+            setPendingManualResult(null);
+            setPendingManualDuplicate(null);
+          }}
+          onCancel={() => {
+            setPendingManualResult(null);
+            setPendingManualDuplicate(null);
+          }}
+        />
+      )}
 
       <Dialog
         open={confirmClear}

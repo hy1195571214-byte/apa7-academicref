@@ -50,6 +50,7 @@ class CitationPipeline:
             images=images,
             hints=hints,
         )
+
         if not structured.doi and document.dois:
             structured.doi = document.dois[0]
 
@@ -59,8 +60,8 @@ class CitationPipeline:
             if message:
                 structured = merge_crossref_into(structured, message)
                 crossref_used = True
-
         rendered = await self._render(structured, locale_policy)
+
         return CitationResult(
             structured=structured,
             rendered=rendered,

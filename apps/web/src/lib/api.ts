@@ -22,6 +22,11 @@ async function parseError(response: Response): Promise<string> {
   return `${response.status} ${response.statusText}`;
 }
 
+export interface DetectReferencesResponse {
+  references: StructuredCitation[];
+  boundaries: number[];
+}
+
 export async function createJob(input: {
   file?: File;
   pastedText?: string;
@@ -42,13 +47,19 @@ export async function createJob(input: {
 }
 
 export async function createJobsBatch(input: {
-  files: File[];
+  files?: File[];
+  pastedTexts?: string[];
   localePolicy: LocalePolicy;
   enableCrossref: boolean;
   vision: VisionMode;
 }): Promise<JobRecord[]> {
   const form = new FormData();
-  for (const file of input.files) form.append("files", file);
+  if (input.files) {
+    for (const file of input.files) form.append("files", file);
+  }
+  if (input.pastedTexts) {
+    form.append("pasted_texts", JSON.stringify(input.pastedTexts));
+  }
   form.append("locale_policy", input.localePolicy);
   form.append("enable_crossref", String(input.enableCrossref));
   form.append("vision", input.vision);
@@ -132,4 +143,20 @@ export async function pollJobsUntilSettled(
 ): Promise<JobRecord[]> {
   const settle = (id: string) => pollJob(id, onUpdate, intervalMs);
   return Promise.all(ids.map(settle));
+}
+
+export async function detectReferences(
+  pastedText: string,
+  localePolicy: LocalePolicy = "en_all",
+): Promise<DetectReferencesResponse> {
+  const form = new FormData();
+  form.append("pasted_text", pastedText);
+  form.append("locale_policy", localePolicy);
+
+  const response = await fetch(`${API_PREFIX}/v1/references/detect`, {
+    method: "POST",
+    body: form,
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<DetectReferencesResponse>;
 }
