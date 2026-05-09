@@ -6,6 +6,9 @@ import base64
 import json
 import logging
 import re
+import time
+import uuid
+from pathlib import Path
 from typing import Any, Iterable, List, Optional
 
 import httpx
@@ -22,6 +25,27 @@ from ..schemas.citation import StructuredCitation
 from ..schemas.summary import LiteratureSummary
 
 logger = logging.getLogger(__name__)
+_DEBUG_LOG_PATH = Path("/Users/wangyichen/.cursor/projects/apa7th webside/.cursor/debug-030a4d.log")
+
+
+def _debug_log(*, run_id: str, hypothesis_id: str, location: str, message: str, data: dict) -> None:
+    # region agent log
+    entry = {
+        "sessionId": "030a4d",
+        "id": f"log_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}",
+        "timestamp": int(time.time() * 1000),
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+    }
+    try:
+        with _DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # endregion
 
 
 EXTRACTION_SYSTEM_PROMPT = """You extract bibliographic metadata for APA 7th
@@ -283,6 +307,7 @@ class MiniMaxClient:
         images: Optional[List[bytes]] = None,
         language: str = "zh",
     ) -> LiteratureSummary:
+        run_id = f"minimax_summary_{int(time.time() * 1000)}"
         system_prompt = SUMMARY_SYSTEM_PROMPT_EN if language == "en" else SUMMARY_SYSTEM_PROMPT_ZH
         header = (
             "Excerpt:\n" if text else "(Visual input only; transcribe and summarise.)\n"
@@ -290,15 +315,51 @@ class MiniMaxClient:
         payload = f"{header}{text}" if text else header
         model = self._model_vision if images else self._model_text
         content = _build_user_content(payload, images or [])
-        response = await self._chat(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": content},
-            ],
+        _debug_log(
+            run_id=run_id,
+            hypothesis_id="H1_H2_H3",
+            location="services/minimax.py:summarize",
+            message="Sending summary request to MiniMax",
+            data={"model": model, "text_length": len(text or ""), "image_count": len(images or [])},
         )
-        data = _parse_json(response)
-        return LiteratureSummary.model_validate(data)
+        try:
+            response = await self._chat(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": content},
+                ],
+            )
+            _debug_log(
+                run_id=run_id,
+                hypothesis_id="H2_H3",
+                location="services/minimax.py:summarize",
+                message="Received raw summary response",
+                data={"response_preview": (response or "")[:200], "response_length": len(response or "")},
+            )
+            data = _parse_json(response)
+            summary = LiteratureSummary.model_validate(data)
+            _debug_log(
+                run_id=run_id,
+                hypothesis_id="H3",
+                location="services/minimax.py:summarize",
+                message="Summary model validation succeeded",
+                data={
+                    "key_claims_count": len(summary.key_claims),
+                    "keywords_count": len(summary.keywords),
+                    "topic_tags_count": len(summary.topic_tags),
+                },
+            )
+            return summary
+        except Exception as exc:
+            _debug_log(
+                run_id=run_id,
+                hypothesis_id="H1_H2_H3",
+                location="services/minimax.py:summarize",
+                message="Summary processing failed",
+                data={"error_type": type(exc).__name__, "error": str(exc)},
+            )
+            raise
 
     async def render_apa(
         self,
@@ -350,6 +411,13 @@ class MiniMaxClient:
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(url, json=body, headers=headers)
+            _debug_log(
+                run_id=f"minimax_chat_{int(time.time() * 1000)}",
+                hypothesis_id="H1",
+                location="services/minimax.py:_chat",
+                message="MiniMax HTTP response received",
+                data={"status_code": response.status_code, "model": model},
+            )
             if response.status_code >= 500:
                 raise httpx.HTTPStatusError(
                     f"Server error: {response.status_code}",
