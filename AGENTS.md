@@ -23,7 +23,7 @@ The frontend proxies `/api/backend/*` → `http://localhost:8000` via `next.conf
 
 ### Non-obvious caveats
 
-- The backend requires `MINIMAX_API_KEY` in `services/api/.env` for LLM-powered citation extraction/rendering. Without it, the `/v1/render` and `/v1/jobs` endpoints will return a 400 error, but the app still starts and health checks pass.
+- The backend requires `MINIMAX_API_KEY` in `services/api/.env` for LLM-powered citation extraction/rendering. Without it, the `/v1/render` and `/v1/jobs` endpoints will return a 400 error, but the app still starts and health checks pass. If the environment variable `MINIMAX_API_KEY` is set (e.g. via Cursor Secrets), write it into `services/api/.env` before starting the backend.
 - Backend tests mock all external API calls (MiniMax, Crossref), so `pytest` passes without any API key configured.
 - The `.eslintrc.json` file in `apps/web` must exist for `pnpm lint` to work non-interactively. If missing, `next lint` will prompt interactively.
 - Python venv is at `services/api/.venv`. Always activate it before running backend commands.
